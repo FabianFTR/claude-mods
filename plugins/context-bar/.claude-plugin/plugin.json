@@ -1,0 +1,7 @@
+{
+  "name": "context-bar",
+  "version": "0.1.0",
+  "description": "Context window, session and weekly usage limits as compact bars above the prompt",
+  "author": { "name": "FabianFTR", "url": "https://github.com/FabianFTR" },
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "faby-mods",
+  "description": "Mods for Claude Code by FabianFTR",
+  "owner": {
+    "name": "FabianFTR"
+  },
+  "plugins": [
+    {
+      "name": "context-bar",
+      "source": "./plugins/context-bar",
+      "description": "Context window, session and weekly usage limits as compact bars above the prompt"
+    }
+  ]
+}
