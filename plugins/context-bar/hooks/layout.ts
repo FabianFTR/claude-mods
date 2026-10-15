@@ -13,6 +13,7 @@ import {
   EDIT_TOOLS,
   FALLBACK_COLOR,
   FREE_COLOR,
+  LIGHT_THEME_COLORS,
   HATCH_BASE_OPACITY,
   HATCH_SPACING,
   HATCH_STRIPE,
@@ -20,8 +21,13 @@ import {
   LIMIT_COLORS,
   MESSAGE_PART_NAMES,
   MIN_VISIBLE_SHARE,
+  OTHER_MIN_BAR_SHARE,
+  OTHER_NAME,
   OUTLINE_COLOR,
   PACE_COLOR,
+  TOGGLE_OFF_DOT_COLOR,
+  TOGGLE_OFF_TEXT_COLOR,
+  TOGGLE_ON_TEXT_COLOR,
   PROJECTION_DANGER_AT,
   PROJECTION_MIN_ELAPSED,
   PROJECTION_WARN_AT,
@@ -30,31 +36,150 @@ import {
   USED_DANGER_AT,
 } from './config'
 
-/** The colour a segment is drawn in, in the bar and the legend alike. */
+// ── Theme ───────────────────────────────────────────────────────────────────
+
+export type Theme = 'dark' | 'light'
+
+/** Every colour the band draws with, for one theme. */
+export type Palette = {
+  categories: Record<string, string>
+  free: string
+  outline: string
+  division: string
+  pace: string
+  toggleOnText: string
+  toggleOffText: string
+  toggleOffDot: string
+}
+
+const DARK: Palette = {
+  categories: CATEGORY_COLORS,
+  free: FREE_COLOR,
+  outline: OUTLINE_COLOR,
+  division: DIVISION_COLOR,
+  pace: PACE_COLOR,
+  toggleOnText: TOGGLE_ON_TEXT_COLOR,
+  toggleOffText: TOGGLE_OFF_TEXT_COLOR,
+  toggleOffDot: TOGGLE_OFF_DOT_COLOR,
+}
+
+const LIGHT: Palette = {
+  ...DARK,
+  ...LIGHT_THEME_COLORS,
+  categories: { ...CATEGORY_COLORS, ...LIGHT_THEME_COLORS.categories },
+}
+
+let palette = DARK
+
+/** Switches every colour below to the theme's; the band calls it as it draws. */
+export function useTheme(theme: Theme) {
+  palette = theme === 'light' ? LIGHT : DARK
+}
+
+/** The colours of the current theme. */
+export const colors = (): Palette => palette
+
+/** The system theme from `reg query ... AppsUseLightTheme` (Windows) or `defaults read -g AppleInterfaceStyle` (macOS). */
+export function themeFromSystem(output: { windows?: string; mac?: string }): Theme {
+  if (output.windows !== undefined) return /AppsUseLightTheme\s+REG_DWORD\s+0x0*1\b/.test(output.windows) ? 'light' : 'dark'
+  if (output.mac !== undefined) return /dark/i.test(output.mac) ? 'dark' : 'light'
+  return 'dark'
+}
+
+/** The colour a segment is drawn in, in the bar and the legend alike; Other by its name. */
 export const colorOf = (s: Segment) =>
-  s.kind === 'free' ? FREE_COLOR : CATEGORY_COLORS[s.name] ?? FALLBACK_COLOR
+  s.kind === 'free' ? palette.free : palette.categories[s.name] ?? FALLBACK_COLOR
+
+// ── Numbers ─────────────────────────────────────────────────────────────────
+
+/** Tokens, short: `800`, `3.2k`, `44k`, `1.2M`. */
+export function formatTokens(n: number): string {
+  const sign = n < 0 ? '−' : ''
+  const a = Math.abs(Math.round(n))
+  if (a < 1000) return `${sign}${a}`
+  if (a < 1_000_000) return `${sign}${(a / 1000).toFixed(a < 10_000 ? 1 : 0).replace(/\.0$/, '')}k`
+  return `${sign}${(a / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+}
+
+/** What the last reply added: `+3.2k last reply`; empty when nothing changed or unknown. */
+export function growthLabel(delta: number | null): string {
+  if (delta === null || Math.round(delta) === 0) return ''
+  return `${delta > 0 ? '+' : ''}${formatTokens(delta)} last reply`
+}
+
+/** The session's cost, `$1.24 session`, when it should show; empty otherwise. */
+export function costLabel(usd: number | null, mode: 'auto' | 'always' | 'never', onSubscription: boolean): string {
+  if (usd === null || mode === 'never') return ''
+  if (mode === 'auto' && (onSubscription || usd <= 0)) return ''
+  return `$${usd.toFixed(usd < 10 ? 2 : 1)} session`
+}
+
+/** Text safe inside SVG markup. */
+const xml = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+/** A segment's hover text: `Commands · 44k · 22.2%`. */
+export const segmentTitle = (name: string, tokens: number, window: number) =>
+  `${name} · ${formatTokens(tokens)} · ${percent(tokens, window)}%`
+
+// ── Alerts ──────────────────────────────────────────────────────────────────
+
+/** How full the context window is, in percent: everything but free space. */
+export const contextFullPercent = (segments: readonly Segment[], window: number) =>
+  window > 0 ? (100 * (window - segments.filter(s => s.kind === 'free').reduce((n, s) => n + s.tokens, 0))) / window : 0
+
+/**
+ * Whether to raise an alert for a value against its threshold, given whether
+ * it was raised already: once on crossing up, then not again until the value
+ * has dropped `reset` below the threshold.
+ */
+export function alertStep(value: number, threshold: number, wasAlerted: boolean, reset = 5) {
+  if (value >= threshold) return { raise: !wasAlerted, alerted: true }
+  return { raise: false, alerted: wasAlerted && value > threshold - reset }
+}
 
 /** `tokens` as a share of `window`, one decimal, no sign: `"12.3"`. */
 export const percent = (tokens: number, window: number) =>
   window > 0 ? ((tokens / window) * 100).toFixed(1) : '0.0'
 
-/**
- * The one order bar and legend share: the compaction reserve first, then
- * what is used as /context lists it, free space last.
- */
-export const ordered = (segments: readonly Segment[]): Segment[] => [
-  ...segments.filter(s => s.kind === 'buffer'),
-  ...segments.filter(s => s.kind !== 'buffer' && s.kind !== 'free'),
-  ...segments.filter(s => s.kind === 'free'),
-]
+/** What the bar and legend show, and what is gathered into Other. */
+export type Grouped = {
+  /** In bar and legend order: the compaction reserve, Other, the rest smallest first, free space. */
+  segments: Segment[]
+  /** What Other holds, smallest first: hidden categories and those under MIN_VISIBLE_SHARE. */
+  inOther: Segment[]
+}
 
 /**
- * The segments the bar fills, left to right. Free space is not one of them:
- * it is whatever they leave. Anything under the visibility threshold is
- * legend-only.
+ * Sorts the breakdown for the bar and legend. Hidden categories, and any
+ * under MIN_VISIBLE_SHARE of the window, are gathered into one `Other`
+ * segment. Order: the compaction reserve, Other, the rest from smallest to
+ * largest, free space last. Free space is never hidden.
  */
-export const barSegments = (segments: readonly Segment[], window: number) =>
-  segments.filter(s => s.kind !== 'free' && s.tokens / window >= MIN_VISIBLE_SHARE)
+export function groupSegments(segments: readonly Segment[], window: number, hidden: readonly string[]): Grouped {
+  const isHidden = (s: Segment) => hidden.includes(s.name)
+  const isSmall = (s: Segment) => window > 0 && s.tokens / window < MIN_VISIBLE_SHARE
+  const bySize = (a: Segment, b: Segment) => a.tokens - b.tokens
+
+  const used = segments.filter(s => s.kind !== 'free')
+  const inOther = used.filter(s => isHidden(s) || isSmall(s)).sort(bySize)
+  const shown = used.filter(s => !inOther.includes(s))
+
+  const other: Segment[] = inOther.length
+    ? [{ name: OTHER_NAME, tokens: inOther.reduce((n, s) => n + s.tokens, 0), color: '', kind: 'other' }]
+    : []
+  return {
+    segments: [
+      ...shown.filter(s => s.kind === 'buffer'),
+      ...other,
+      ...shown.filter(s => s.kind !== 'buffer').sort(bySize),
+      ...segments.filter(s => s.kind === 'free'),
+    ],
+    inOther,
+  }
+}
+
+/** The segments the bar fills, left to right; free space is what they leave. */
+export const barSegments = (grouped: Grouped) => grouped.segments.filter(s => s.kind !== 'free')
 
 /** Tokens taken from the window: everything but free space. */
 export const usedTokens = (segments: readonly Segment[]) =>
@@ -65,32 +190,37 @@ export const usedTokens = (segments: readonly Segment[]) =>
  * filled segments laid edge to edge on it, and an outline around it all.
  * Widths are exact (fractions of a pixel), so there are no gaps.
  */
-export function barSvg(filled: readonly Segment[], window: number): string {
+export function barSvg(filled: readonly Segment[], window: number, titles = false): string {
   const W = 1000 // viewBox units; stretched to whatever width the band has
   const H = 10
 
   let x = 0
   const rects = filled.map(s => {
-    const w = Math.min((s.tokens / window) * W, W - x)
+    // Other is drawn at least OTHER_MIN_BAR_SHARE wide, so it shows when tiny.
+    const share = s.kind === 'other' ? Math.max(s.tokens / window, OTHER_MIN_BAR_SHARE) : s.tokens / window
+    const w = Math.min(share * W, W - x)
     const box = `x="${x.toFixed(3)}" y="0" width="${w.toFixed(3)}" height="${H}"`
     x += w
+    const title = titles ? `<title>${xml(segmentTitle(s.name, s.tokens, window))}</title>` : ''
     return s.kind === 'buffer'
       ? `<rect ${box} fill="${colorOf(s)}" fill-opacity="${HATCH_BASE_OPACITY}"/>` +
-          `<rect ${box} fill="url(#hatch)"/>`
-      : `<rect ${box} fill="${colorOf(s)}"/>`
+          `<rect ${box} fill="url(#hatch)">${title}</rect>`
+      : `<rect ${box} fill="${colorOf(s)}">${title}</rect>`
   })
 
-  const reserve = CATEGORY_COLORS['Autocompact buffer'] ?? FALLBACK_COLOR
+  const freeTokens = Math.max(0, window - filled.reduce((n, s) => n + s.tokens, 0))
+  const freeTitle = titles ? `<title>${xml(segmentTitle('Free space', freeTokens, window))}</title>` : ''
+  const reserve = palette.categories['Autocompact buffer'] ?? FALLBACK_COLOR
   const whole = `x="0" y="0" width="${W}" height="${H}"`
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`,
     `<defs><pattern id="hatch" width="${HATCH_SPACING}" height="${H}" patternUnits="userSpaceOnUse">`,
     `<rect x="0" y="0" width="${HATCH_STRIPE}" height="${H}" fill="${reserve}"/></pattern></defs>`,
-    `<rect ${whole} fill="${FREE_COLOR}"/>`,
+    `<rect ${whole} fill="${palette.free}">${freeTitle}</rect>`,
     ...rects,
     // Half the stroke falls outside and is clipped, leaving a 1px line.
-    `<rect ${whole} fill="none" stroke="${OUTLINE_COLOR}" stroke-width="2" vector-effect="non-scaling-stroke"/>`,
+    `<rect ${whole} fill="none" stroke="${palette.outline}" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`,
     `</svg>`,
   ].join('')
 }
@@ -98,7 +228,7 @@ export function barSvg(filled: readonly Segment[], window: number): string {
 /**
  * The bar in whole terminal cells: how many each filled segment gets, and
  * how many are left for free space. Rounded cumulatively, so the cells add
- * up to exactly `width`.
+ * up to exactly `width`. Other gets at least one cell, taken from free space.
  */
 export function barCells(filled: readonly Segment[], window: number, width: number) {
   let acc = 0
@@ -110,7 +240,13 @@ export function barCells(filled: readonly Segment[], window: number, width: numb
     prev = end
     return { segment, count }
   })
-  return { cells, free: width - prev }
+  let free = width - prev
+  const other = cells.find(c => c.segment.kind === 'other')
+  if (other && other.count === 0 && free > 0) {
+    other.count = 1
+    free -= 1
+  }
+  return { cells, free }
 }
 
 // ── Usage limits ────────────────────────────────────────────────────────────
@@ -193,7 +329,7 @@ const clampPercent = (p: number) => Math.min(Math.max(p, 0), 100)
  * proportions; they are set wide enough that every bar, thick or thin, fills
  * the space it is given rather than stopping short.
  */
-export function limitSvg(percentUsed: number, color: string, divisions: number, heightPx: number, pace?: number): string {
+export function limitSvg(percentUsed: number, color: string, divisions: number, heightPx: number, pace?: number, title?: string): string {
   const W = 1000
   const H = 10
   const DRAWN_WIDTH = 8000 // wider than any band, at any height
@@ -203,16 +339,17 @@ export function limitSvg(percentUsed: number, color: string, divisions: number, 
     `<line x1="${x.toFixed(3)}" y1="0" x2="${x.toFixed(3)}" y2="${H}" stroke="${color}" stroke-width="${px}" vector-effect="non-scaling-stroke"/>`
 
   const dividers = Array.from({ length: Math.max(divisions - 1, 0) }, (_, i) =>
-    line(((i + 1) / divisions) * W, DIVISION_COLOR, 1),
+    line(((i + 1) / divisions) * W, palette.division, 1),
   )
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${DRAWN_WIDTH}" height="${heightPx}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`,
-    `<rect ${whole} fill="${FREE_COLOR}"/>`,
+    title ? `<title>${xml(title)}</title>` : '',
+    `<rect ${whole} fill="${palette.free}"/>`,
     `<rect x="0" y="0" width="${w.toFixed(3)}" height="${H}" fill="${color}"/>`,
     ...dividers,
-    `<rect ${whole} fill="none" stroke="${OUTLINE_COLOR}" stroke-width="2" vector-effect="non-scaling-stroke"/>`,
-    pace === undefined ? '' : line(pace * W, PACE_COLOR, 2),
+    `<rect ${whole} fill="none" stroke="${palette.outline}" stroke-width="2" vector-effect="non-scaling-stroke"/>`,
+    pace === undefined ? '' : line(pace * W, palette.pace, 2),
     `</svg>`,
   ].join('')
 }
@@ -478,8 +615,8 @@ export function messageWeights(messages: readonly ChatMessage[]): MessageWeights
 }
 
 /**
- * \`total\` tokens shared out in proportion to \`weights\`, in whole tokens that
- * add up to exactly \`total\` (largest remainders get the leftovers).
+ * `total` tokens shared out in proportion to `weights`, in whole tokens that
+ * add up to exactly `total` (largest remainders get the leftovers).
  */
 export function splitTokens(total: number, weights: MessageWeights): MessageWeights {
   const parts = Object.keys(weights) as MessagePart[]
@@ -499,8 +636,9 @@ export function splitTokens(total: number, weights: MessageWeights): MessageWeig
 }
 
 /**
- * The breakdown with its \`Messages\` row replaced by the four parts, in its
- * place; unchanged when there is no Messages row or nothing to weigh.
+ * The breakdown with its `Messages` row replaced by the parts, in its place
+ * and in MESSAGE_PART_NAMES order; unchanged when there is no Messages row or
+ * nothing to weigh.
  */
 export function splitMessages(segments: readonly Segment[], messages: readonly ChatMessage[]): Segment[] {
   const index = segments.findIndex(s => s.name === 'Messages')

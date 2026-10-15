@@ -19,12 +19,13 @@ export const CATEGORY_COLORS: Record<string, string> = {
   // Messages split by who wrote it (see Messages split below):
   'Your messages': '#A78BFA', // light violet: what you typed and pasted
   "Claude's replies": '#7C3AED', // deep violet: what Claude wrote
-  // Tool use, in the family of System tools (blues):
-  'File reads': '#BFDBFE', // palest blue: files read, and what came back
+  // Tool use: blues like System tools, with reading in parchment so it stands out:
+  'File reads': '#D9C49A', // parchment: files read, and what came back
   Commands: '#93C5FD', // light blue: shell commands and their output
   Edits: '#1D4ED8', // deep blue: text written into files
   'Other tools': '#7DD3FC', // sky blue: MCP, browser, web, agents, questions...
   'Auto context': '#94A3B8', // grey-blue: reminders and plugin context added for you
+  Other: '#A1A1AA', // neutral grey: what you hid, and everything under 1%
 }
 
 // Any category not listed above (a new one in a future version).
@@ -89,10 +90,24 @@ export const AUTO_CONTEXT_PREFIXES = [
 // this; it counts as Claude's replies.
 export const COMPACTION_SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
 
-// ── Bar ─────────────────────────────────────────────────────────────────────
-// A category below this share of the window shows in the legend only.
-// 0.01 = 1%.
+// ── Other ───────────────────────────────────────────────────────────────────
+// `Other` gathers the categories you hide (click one in the legend, or
+// /context-bar hide <name>) and every category below MIN_VISIBLE_SHARE. Click
+// Other in the legend to list them; click one there to bring it back.
+export const OTHER_NAME = 'Other'
+
+// A category below this share of the window goes into Other. 0.01 = 1%.
 export const MIN_VISIBLE_SHARE = 0.01
+
+// Other is drawn at least this wide on the bar, so it shows even when tiny.
+// 0.003 = 0.3% of the bar.
+export const OTHER_MIN_BAR_SHARE = 0.003
+
+// Categories hidden until you choose otherwise; your choice is then
+// remembered across sessions.
+export const DEFAULT_HIDDEN: string[] = []
+
+// ── Bar ─────────────────────────────────────────────────────────────────────
 
 // Bar height in the desktop app, in CSS pixels (about one text row).
 export const BAR_HEIGHT_PX = 14
@@ -199,6 +214,54 @@ export const TOGGLE_ON_TEXT_COLOR = '#E4E4E7'
 export const TOGGLE_OFF_TEXT_COLOR = '#8B8B94'
 // The context button's dot; the limit buttons take their bar's current colour.
 export const TOGGLE_CONTEXT_COLOR = CATEGORY_COLORS.Messages!
+
+// ── Details ─────────────────────────────────────────────────────────────────
+// Hover a part of a bar to see its name, tokens and share (desktop app only).
+// false draws the bars as plain images, without hover.
+export const BAR_TOOLTIPS = true
+
+// At the end of the legend: how much the last reply added to the context
+// (`+3.2k last reply`).
+export const SHOW_GROWTH = true
+
+// The session's cost (`$1.24 session`): 'auto' shows it when there are no
+// subscription limits (paying per use), 'always' or 'never' as said.
+export const SHOW_COST: 'auto' | 'always' | 'never' = 'auto'
+
+// How often the band redraws on its own, so "resets in" stays current
+// between replies, in milliseconds.
+export const CLOCK_TICK_MS = 60_000
+
+// ── Alerts ──────────────────────────────────────────────────────────────────
+// A short notice above the prompt, once each time a threshold is crossed.
+export const ALERTS = true
+// When the context window is this full, in percent.
+export const CONTEXT_ALERT_AT = 80
+// When a usage limit turns red.
+export const ALERT_ON_LIMIT_RED = true
+// How long a notice stays, in milliseconds.
+export const ALERT_TOAST_MS = 8000
+
+// ── Theme ───────────────────────────────────────────────────────────────────
+// The colours above suit a dark background. On a light one, these replace
+// them. 'auto' follows the system theme (Windows or macOS); set 'dark' or
+// 'light' if the Claude app is set differently from your system.
+export const THEME: 'auto' | 'dark' | 'light' = 'auto'
+export const LIGHT_THEME_COLORS = {
+  categories: {
+    'System prompt': '#475569', // slate instead of near-white
+    'File reads': '#A07D3B', // deeper parchment
+    'Auto context': '#64748B',
+    Other: '#71717A',
+  } as Record<string, string>,
+  free: '#E4E4E7',
+  outline: '#A1A1AA',
+  division: '#FFFFFF',
+  pace: '#18181B',
+  toggleOnText: '#27272A',
+  toggleOffText: '#71717A',
+  toggleOffDot: '#A1A1AA',
+}
 
 // ── Legend ──────────────────────────────────────────────────────────────────
 export const LEGEND_MARKER = '■'

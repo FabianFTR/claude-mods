@@ -23,6 +23,18 @@ In the first 10% of a window the pace means little, so the colour comes from the
 share used alone (yellow from 65%, red from 90%). The limit bars appear on a
 subscription once the first reply has reported them.
 
+## Details
+
+- **Hover** a part of a bar to see its name, tokens and share (desktop app).
+- At the end of the legend: what the **last reply** added to the context
+  (`+3.2k last reply`) and, when you pay per use, the **session's cost**.
+- "Resets in" stays current: the band redraws every minute.
+- **Notices**: once when the context passes 80% full, and once when a usage
+  limit turns red.
+- **Light theme**: with `THEME = 'auto'` the colours follow your system theme
+  (Windows or macOS). If the Claude app is set differently, set `THEME` to
+  `'dark'` or `'light'` in `hooks/config.ts`.
+
 ## Turning parts on and off
 
 | Command | Does |
@@ -31,6 +43,8 @@ subscription once the first reply has reported them.
 | `/context-bar context` | Hides or shows the context bar and legend |
 | `/context-bar session` | Hides or shows the session limit |
 | `/context-bar weekly` | Hides or shows the weekly limit |
+| `/context-bar hide <category>` | Moves a category into Other, e.g. `/context-bar hide mcp tools` |
+| `/context-bar unhide <category>` | Takes it back out; `unhide all` brings every one back |
 
 The **● Context · ● Session · ● Weekly** buttons in the bottom-right corner do the
 same: a filled, coloured dot when a part is on, a hollow grey ring and softer text
@@ -42,9 +56,12 @@ remembered across sessions.
  Autocompact buffer · System tools · Messages · ...          Free space
 ```
 
-- The bar fills from the left: the compaction reserve first, then each category
-  in the order `/context` lists them. Free space is what is left on the right.
-- A category under 1% of the window shows in the legend only.
+- The bar fills from the left: the compaction reserve first, then **Other**, then
+  every other category from smallest to largest. Free space is what is left on the right.
+- **Other** gathers the categories you hide and every one under 1% of the window.
+  Click a category in the legend to move it into Other; click **Other ▸** to list
+  what it holds, and click one there to bring it back. Your choice is remembered
+  across sessions. Other is drawn even when tiny, so it never disappears.
 - `/context` counts the conversation as one `Messages` row. The bar splits that
   figure by reading the conversation and weighing each part (text by length,
   images by size as the API bills them); the parts always add up to the official
@@ -65,7 +82,8 @@ All the settings are in [`hooks/config.ts`](hooks/config.ts):
 | `READ_TOOLS`, `COMMAND_TOOLS`, `EDIT_TOOLS` | Which tool counts as a file read, a command or an edit |
 | `SHELL_READ_COMMANDS` | Shell programs that only read, so count as file reads |
 | `AUTO_CONTEXT_PREFIXES`, `IMAGE_TOKENS_ESTIMATE` | What counts as auto context; the cost of an image of unknown size |
-| `MIN_VISIBLE_SHARE` | The share below which a category is legend-only (`0.01` = 1%) |
+| `MIN_VISIBLE_SHARE` | The share below which a category goes into Other (`0.01` = 1%) |
+| `DEFAULT_HIDDEN`, `OTHER_MIN_BAR_SHARE` | Categories hidden from the start; Other's minimum width on the bar |
 | `BAR_HEIGHT_PX` | The bar height in the desktop app |
 | `HATCH_*` | The stripes on the compaction reserve |
 | `TERMINAL_GLYPHS` | The characters used to draw the bar in a terminal |
@@ -79,6 +97,11 @@ All the settings are in [`hooks/config.ts`](hooks/config.ts):
 | `DIVISION_COLOR` | The lines between hours (session) or days (weekly) |
 | `DEFAULT_SHOW` | Which parts are shown before you choose |
 | `SHOW_TOGGLE_BUTTONS` | Whether the toggle buttons are drawn |
+| `BAR_TOOLTIPS` | Hover details on the bars (`false` if they ever misbehave) |
+| `SHOW_GROWTH`, `SHOW_COST` | The last reply's growth and the session's cost at the end of the legend |
+| `CLOCK_TICK_MS` | How often the band redraws on its own |
+| `ALERTS`, `CONTEXT_ALERT_AT`, `ALERT_ON_LIMIT_RED`, `ALERT_TOAST_MS` | The notices |
+| `THEME`, `LIGHT_THEME_COLORS` | Which theme to follow, and the colours that change on a light background |
 | `TOGGLE_*` | The buttons' dots, colours and the width of their column |
 
 After editing, run `/reload-plugins` in Claude Code, then send a message so the

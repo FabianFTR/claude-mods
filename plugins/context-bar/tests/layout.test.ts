@@ -6,19 +6,26 @@ import {
   COMPACTION_SUMMARY_PREFIX,
   FREE_COLOR,
   IMAGE_TOKENS_ESTIMATE,
+  LIGHT_THEME_COLORS,
   LIMIT_COLORS,
   LIMITS,
   MESSAGE_PART_NAMES,
+  OTHER_MIN_BAR_SHARE,
   TOGGLE_DOT_PX,
 } from '../hooks/config'
 import {
   barCells,
   barSegments,
+  alertStep,
   barSvg,
   colorOf,
+  colors,
+  contextFullPercent,
+  costLabel,
   cssPx,
   dotSvg,
   elapsedShare,
+  formatTokens,
   imageSize,
   imageTokens,
   isShellRead,
@@ -28,13 +35,16 @@ import {
   limitLevel,
   limitSvg,
   messageWeights,
-  ordered,
+  groupSegments,
+  growthLabel,
   percent,
   projectedPercent,
   splitMessages,
   splitTokens,
+  themeFromSystem,
   timeUntil,
   toolPart,
+  useTheme,
   zoomFromConfig,
 } from '../hooks/layout'
 import type { ChatBlock, ChatMessage } from '../hooks/layout'
@@ -51,38 +61,78 @@ const BREAKDOWN: Segment[] = [
   seg('Autocompact buffer', 6_600, 'buffer'),
 ]
 
-describe('order', () => {
-  test('reserve first, used in /context order, free last', () => {
-    expect(ordered(BREAKDOWN).map(s => s.name)).toEqual([
-      'Autocompact buffer',
-      'System prompt',
-      'System tools',
-      'Messages',
-      'Free space',
-    ])
+describe('order and Other', () => {
+  const names = (hidden: string[] = []) => groupSegments(BREAKDOWN, WINDOW, hidden).segments.map(s => s.name)
+
+  test('reserve, then Other, then the rest smallest first, free space last', () => {
+    expect(names()).toEqual(['Autocompact buffer', 'Other', 'System tools', 'Messages', 'Free space'])
+  })
+
+  test('a category under 1% goes into Other', () => {
+    const { inOther, segments } = groupSegments(BREAKDOWN, WINDOW, [])
+    expect(inOther.map(s => s.name)).toEqual(['System prompt'])
+    expect(segments.find(s => s.name === 'Other')!.tokens).toBe(800)
+  })
+
+  test('exactly 1% stays out of Other', () => {
+    const { inOther } = groupSegments([seg('Skills', 2_000)], WINDOW, [])
+    expect(inOther).toHaveLength(0)
+  })
+
+  test('a hidden category goes into Other, whatever its size', () => {
+    expect(names(['Messages'])).toEqual(['Autocompact buffer', 'Other', 'System tools', 'Free space'])
+    const { inOther } = groupSegments(BREAKDOWN, WINDOW, ['Messages'])
+    expect(inOther.map(s => s.name)).toEqual(['System prompt', 'Messages']) // smallest first
+  })
+
+  test('a hidden reserve puts Other first', () => {
+    expect(names(['Autocompact buffer'])[0]).toBe('Other')
+  })
+
+  test('free space cannot be hidden', () => {
+    expect(names(['Free space'])).toContain('Free space')
+  })
+
+  test('no Other when nothing is hidden or small', () => {
+    const plain = [seg('System tools', 6_800), seg('Free space', 100_000, 'free')]
+    expect(groupSegments(plain, WINDOW, []).segments.map(s => s.name)).toEqual(['System tools', 'Free space'])
+  })
+
+  test('the order follows size as it changes', () => {
+    const grown = [seg('Skills', 9_000), seg('Messages', 4_000), seg('System tools', 6_000)]
+    expect(groupSegments(grown, WINDOW, []).segments.map(s => s.name)).toEqual(['Messages', 'System tools', 'Skills'])
   })
 })
 
 describe('bar', () => {
-  test('a segment under 1% is legend-only', () => {
-    const names = barSegments(ordered(BREAKDOWN), WINDOW).map(s => s.name)
-    expect(names).toEqual(['Autocompact buffer', 'System tools', 'Messages'])
-  })
+  const bar = (hidden: string[] = []) => barSegments(groupSegments(BREAKDOWN, WINDOW, hidden))
 
-  test('exactly 1% is drawn', () => {
-    expect(barSegments([seg('Skills', 2_000)], WINDOW)).toHaveLength(1)
+  test('the bar holds everything but free space, Other included', () => {
+    expect(bar().map(s => s.name)).toEqual(['Autocompact buffer', 'Other', 'System tools', 'Messages'])
   })
 
   test('the SVG lays segments edge to edge at exact widths', () => {
-    const svg = barSvg(barSegments(ordered(BREAKDOWN), WINDOW), WINDOW)
+    const svg = barSvg(bar(), WINDOW)
     expect(svg).toContain('x="0.000" y="0" width="33.000"') // reserve, 3.3%
-    expect(svg).toContain('x="33.000" y="0" width="34.000"') // System tools, 3.4%
-    expect(svg).toContain('x="67.000" y="0" width="134.000"') // Messages, 13.4%
+    expect(svg).toContain('x="33.000" y="0" width="4.000"') // Other, 0.4%
+    expect(svg).toContain('x="37.000" y="0" width="34.000"') // System tools, 3.4%
+    expect(svg).toContain('x="71.000" y="0" width="134.000"') // Messages, 13.4%
+  })
+
+  test('a tiny Other is still drawn at its minimum width', () => {
+    const svg = barSvg(barSegments(groupSegments([seg('Skills', 20)], WINDOW, [])), WINDOW)
+    expect(svg).toContain(`width="${(OTHER_MIN_BAR_SHARE * 1000).toFixed(3)}"`)
   })
 
   test('terminal cells add up to the full width', () => {
-    const { cells, free } = barCells(barSegments(ordered(BREAKDOWN), WINDOW), WINDOW, 60)
+    const { cells, free } = barCells(bar(), WINDOW, 60)
     expect(cells.reduce((n, c) => n + c.count, 0) + free).toBe(60)
+  })
+
+  test('a tiny Other gets at least one terminal cell', () => {
+    const { cells, free } = barCells(barSegments(groupSegments([seg('Skills', 20)], WINDOW, [])), WINDOW, 60)
+    expect(cells[0]!.count).toBe(1)
+    expect(free).toBe(59)
   })
 })
 
@@ -90,6 +140,7 @@ describe('colours', () => {
   test('bar and legend take the colour from config', () => {
     expect(colorOf(seg('Messages', 1))).toBe(CATEGORY_COLORS.Messages)
     expect(colorOf(seg('Free space', 1, 'free'))).toBe(FREE_COLOR)
+    expect(colorOf(seg('Other', 1, 'other'))).toBe(CATEGORY_COLORS.Other)
   })
 
   test('percent has one decimal', () => {
@@ -496,5 +547,89 @@ describe('messages split', () => {
     for (const name of Object.values(MESSAGE_PART_NAMES)) {
       expect(colorOf(seg(name, 1))).toBe(CATEGORY_COLORS[name])
     }
+  })
+})
+
+describe('details', () => {
+  test('tokens are short and readable', () => {
+    expect(formatTokens(800)).toBe('800')
+    expect(formatTokens(3_240)).toBe('3.2k')
+    expect(formatTokens(3_000)).toBe('3k')
+    expect(formatTokens(44_400)).toBe('44k')
+    expect(formatTokens(1_250_000)).toBe('1.3M')
+    expect(formatTokens(-98_000)).toBe('−98k')
+  })
+
+  test('growth says what the last reply added, or nothing', () => {
+    expect(growthLabel(3_240)).toBe('+3.2k last reply')
+    expect(growthLabel(-98_000)).toBe('−98k last reply') // after compaction
+    expect(growthLabel(0)).toBe('')
+    expect(growthLabel(null)).toBe('')
+  })
+
+  test('cost shows when paying per use, or when asked', () => {
+    expect(costLabel(1.237, 'auto', false)).toBe('$1.24 session')
+    expect(costLabel(1.237, 'auto', true)).toBe('') // on a subscription
+    expect(costLabel(1.237, 'always', true)).toBe('$1.24 session')
+    expect(costLabel(12.34, 'always', false)).toBe('$12.3 session')
+    expect(costLabel(1.237, 'never', false)).toBe('')
+    expect(costLabel(null, 'always', false)).toBe('')
+  })
+
+  test('each part of the context bar carries its hover text', () => {
+    const svg = barSvg([seg('Commands', 44_400), seg("Claude's <replies>", 2_000)], WINDOW, true)
+    expect(svg).toContain('<title>Commands · 44k · 22.2%</title>')
+    expect(svg).toContain("<title>Claude's &lt;replies&gt; · 2k · 1.0%</title>") // escaped
+    expect(svg).toContain('<title>Free space · 154k · 76.8%</title>')
+  })
+
+  test('no hover text unless asked', () => {
+    expect(barSvg([seg('Commands', 44_400)], WINDOW)).not.toContain('<title>')
+  })
+
+  test('a limit bar carries one hover text for the whole bar', () => {
+    const svg = limitSvg(42, '#fff', 5, 6, 0.5, 'Session: 42% used, resets in 2h 10m')
+    expect(svg.match(/<title>/g)).toHaveLength(1)
+    expect(svg).toContain('<title>Session: 42% used, resets in 2h 10m</title>')
+  })
+})
+
+describe('alerts', () => {
+  test('context fullness counts everything but free space', () => {
+    expect(contextFullPercent([seg('Messages', 150_000), seg('Free space', 50_000, 'free')], WINDOW)).toBe(75)
+  })
+
+  test('raised once on crossing, not again while above', () => {
+    expect(alertStep(79, 80, false)).toEqual({ raise: false, alerted: false })
+    expect(alertStep(81, 80, false)).toEqual({ raise: true, alerted: true })
+    expect(alertStep(90, 80, true)).toEqual({ raise: false, alerted: true })
+  })
+
+  test('raised again only after dropping well below', () => {
+    expect(alertStep(77, 80, true)).toEqual({ raise: false, alerted: true }) // still within 5
+    expect(alertStep(74, 80, true)).toEqual({ raise: false, alerted: false }) // reset
+    expect(alertStep(82, 80, false)).toEqual({ raise: true, alerted: true })
+  })
+})
+
+describe('theme', () => {
+  test('reads the Windows setting', () => {
+    expect(themeFromSystem({ windows: '    AppsUseLightTheme    REG_DWORD    0x0' })).toBe('dark')
+    expect(themeFromSystem({ windows: '    AppsUseLightTheme    REG_DWORD    0x1' })).toBe('light')
+  })
+
+  test('reads the macOS setting', () => {
+    expect(themeFromSystem({ mac: 'Dark' })).toBe('dark')
+    expect(themeFromSystem({ mac: '' })).toBe('light')
+  })
+
+  test('light theme swaps the pale colours, then dark brings them back', () => {
+    useTheme('light')
+    expect(colorOf(seg('System prompt', 1))).toBe(LIGHT_THEME_COLORS.categories['System prompt'])
+    expect(colorOf(seg('Messages', 1))).toBe(CATEGORY_COLORS.Messages) // unchanged
+    expect(barSvg([seg('Commands', 1)], WINDOW)).toContain(`fill="${LIGHT_THEME_COLORS.free}"`)
+    useTheme('dark')
+    expect(colorOf(seg('System prompt', 1))).toBe(CATEGORY_COLORS['System prompt'])
+    expect(colors().free).toBe(FREE_COLOR)
   })
 })
