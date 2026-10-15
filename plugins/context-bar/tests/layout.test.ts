@@ -1,7 +1,16 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { Segment } from '../types'
-import { CATEGORY_COLORS, FREE_COLOR, LIMIT_COLORS, LIMITS, TOGGLE_DOT_PX } from '../hooks/config'
+import {
+  CATEGORY_COLORS,
+  COMPACTION_SUMMARY_PREFIX,
+  FREE_COLOR,
+  IMAGE_TOKENS_ESTIMATE,
+  LIMIT_COLORS,
+  LIMITS,
+  MESSAGE_PART_NAMES,
+  TOGGLE_DOT_PX,
+} from '../hooks/config'
 import {
   barCells,
   barSegments,
@@ -10,17 +19,25 @@ import {
   cssPx,
   dotSvg,
   elapsedShare,
+  imageSize,
+  imageTokens,
+  isShellRead,
   limitCells,
   limitColor,
   limitLabel,
   limitLevel,
   limitSvg,
+  messageWeights,
   ordered,
   percent,
   projectedPercent,
+  splitMessages,
+  splitTokens,
   timeUntil,
+  toolPart,
   zoomFromConfig,
 } from '../hooks/layout'
+import type { ChatBlock, ChatMessage } from '../hooks/layout'
 
 const WINDOW = 200_000
 const seg = (name: string, tokens: number, kind = 'used'): Segment => ({ name, tokens, kind, color: '' })
@@ -243,5 +260,241 @@ describe('screen scale', () => {
   test('session and weekly get the same height', () => {
     const [session, weekly] = LIMITS.map(l => cssPx(l.heightPx, ZOOM))
     expect(session).toBe(weekly)
+  })
+})
+
+describe('messages split', () => {
+  const user = (...content: ChatBlock[]): ChatMessage => ({ role: 'user', content })
+  const assistant = (...content: ChatBlock[]): ChatMessage => ({ role: 'assistant', content })
+  const text = (t: string): ChatBlock => ({ type: 'text', text: t })
+  const x = (n: number) => 'x'.repeat(n) // n characters, n / 4 rough tokens
+
+  test('your text is yours, Claude\'s text and thinking are Claude\'s', () => {
+    const w = messageWeights([
+      user(text(x(400))),
+      assistant({ type: 'thinking', thinking: x(200) }, text(x(200))),
+    ])
+    expect(w).toEqual({ you: 100, claude: 100, reads: 0, commands: 0, edits: 0, otherTools: 0, auto: 0 })
+  })
+
+  describe('tool use', () => {
+    const call = (id: string, name: string, input: object): ChatMessage =>
+      assistant({ type: 'tool_use', id, name, input })
+    const result = (id: string, content: unknown): ChatMessage =>
+      user({ type: 'tool_result', tool_use_id: id, content })
+
+    test('a Read call and its result are File reads', () => {
+      const w = messageWeights([call('t1', 'Read', { file_path: 'a.ts' }), result('t1', x(800))])
+      expect(w.reads).toBeGreaterThan(200)
+      expect(w.commands + w.edits + w.otherTools).toBe(0)
+    })
+
+    test('Grep and Glob are File reads too', () => {
+      const w = messageWeights([call('g', 'Grep', { pattern: 'x' }), call('h', 'Glob', { pattern: '*' })])
+      expect(w.reads).toBeGreaterThan(0)
+      expect(w.otherTools).toBe(0)
+    })
+
+    test('a shell command and its output are Commands', () => {
+      const w = messageWeights([call('b', 'Bash', { command: 'npm test' }), result('b', x(400))])
+      expect(w.commands).toBeGreaterThan(100)
+      expect(w.reads).toBe(0)
+    })
+
+    test('a shell command that only reads is File reads', () => {
+      const w = messageWeights([call('b', 'Bash', { command: 'cat hooks/config.ts' }), result('b', x(400))])
+      expect(w.reads).toBeGreaterThan(100)
+      expect(w.commands).toBe(0)
+    })
+
+    test('Edit and Write are Edits', () => {
+      const w = messageWeights([
+        call('e', 'Edit', { file_path: 'a.ts', old_string: 'a', new_string: x(400) }),
+        result('e', 'ok'),
+        call('w', 'Write', { file_path: 'b.ts', content: x(400) }),
+      ])
+      expect(w.edits).toBeGreaterThan(200)
+      expect(w.reads + w.commands + w.otherTools).toBe(0)
+    })
+
+    test('any other tool is Other tools, nested result blocks included', () => {
+      const w = messageWeights([
+        call('m', 'mcp__browser__get_page_text', {}),
+        result('m', [text(x(400)), { type: 'image', source: {} }]),
+      ])
+      expect(w.otherTools).toBeGreaterThan(100 + IMAGE_TOKENS_ESTIMATE)
+    })
+
+    test('a result whose call is out of reach is Other tools', () => {
+      const w = messageWeights([result('lost', x(400))])
+      expect(w.otherTools).toBe(100)
+    })
+
+    test('a result follows its own call, not the one before it', () => {
+      const w = messageWeights([
+        assistant(
+          { type: 'tool_use', id: 'r', name: 'Read', input: {} },
+          { type: 'tool_use', id: 'c', name: 'Bash', input: { command: 'npm test' } },
+        ),
+        user({ type: 'tool_result', tool_use_id: 'c', content: x(4000) }, { type: 'tool_result', tool_use_id: 'r', content: x(40) }),
+      ])
+      expect(w.commands).toBeGreaterThan(w.reads)
+    })
+  })
+
+  describe('shell commands that only read', () => {
+    const cases: [string, boolean][] = [
+      ['cat file.ts', true],
+      ['head -n 20 a.txt', true],
+      ['grep -n foo src', true],
+      ['rg foo', true],
+      ['ls -la', true],
+      ['sed -n 10,20p a.ts', true],
+      ['cd ~/x && cat a.ts', true],
+      ['cd C:/repo; grep -rn foo .', true],
+      ['FOO=1 cat a', true],
+      ['T=~/types.d.ts; grep -n foo $T', true],
+      ['M="C:/repo"; F="$M/a.ts"; sed -n 1,9p "$F"', true],
+      ['$f = "a.txt"; Get-Content $f', true],
+      ['M=~/x; cd "$M" && npm test', false],
+      ["cat > notes.md <<'EOF'", false],
+      ['cat a.txt >> b.txt', false],
+      ['grep foo a.ts >out.txt', false],
+      ['grep foo a.ts 2>/dev/null', true],
+      ['ls missing 2>&1', true],
+      ['Get-Content a.txt 2>$null', true],
+      ['Get-Content a.txt', true],
+      ['get-content a.txt', true],
+      ['sed -i s/a/b/ a.ts', false],
+      ['npm test', false],
+      ['git push', false],
+      ['cd ~/x && npm run build', false],
+      ['rm -rf dist', false],
+      ['', false],
+    ]
+    for (const [command, reads] of cases) {
+      test(`${JSON.stringify(command)} ${reads ? 'reads' : 'does more than read'}`, () => {
+        expect(isShellRead(command)).toBe(reads)
+      })
+    }
+
+    test('PowerShell reads count as File reads too', () => {
+      expect(toolPart('PowerShell', { command: 'Get-Content a.txt' })).toBe('reads')
+      expect(toolPart('PowerShell', { command: 'Remove-Item a.txt' })).toBe('commands')
+    })
+  })
+
+  test('reminders, command echoes and skill text are Auto context', () => {
+    const w = messageWeights([
+      user(text(`<system-reminder>${x(380)}</system-reminder>`)),
+      user(text(`<command-name>/reload-plugins</command-name>${x(100)}`)),
+      user(text(`<local-command-stdout>${x(100)}`)),
+      user(text(`Base directory for this skill: ${x(100)}`)),
+      user(text(`[Image: source: C:\shot.png]`)),
+    ])
+    expect(w.you).toBe(0)
+    expect(w.auto).toBeGreaterThan(0)
+  })
+
+  test('a reminder appended to your own text is taken out of it', () => {
+    const reminder = `<system-reminder>${x(365)}</system-reminder>` // 17 + 365 + 18 = 400 chars
+    const w = messageWeights([user(text(`${x(400)}\n${reminder}`))])
+    expect(w.auto).toBe(100)
+    expect(w.you).toBe(100.25) // your 400 chars and the newline
+  })
+
+  test('images and documents you paste are yours', () => {
+    const w = messageWeights([user({ type: 'image', source: {} }, { type: 'document', source: {} })])
+    expect(w.you).toBe(2 * IMAGE_TOKENS_ESTIMATE) // sizes unknown: the estimate
+  })
+
+  describe('image size', () => {
+    // Base64 of a byte array, for building image headers.
+    const b64 = (bytes: number[]) => {
+      const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+      let out = ''
+      for (let i = 0; i < bytes.length; i += 3) {
+        const [a, b = 0, c = 0] = [bytes[i]!, bytes[i + 1], bytes[i + 2]]
+        const n = (a << 16) | (b << 8) | c
+        out += A[(n >> 18) & 63]! + A[(n >> 12) & 63]! + A[(n >> 6) & 63]! + A[n & 63]!
+      }
+      return out
+    }
+    const u32 = (n: number) => [(n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255]
+    const png = (w: number, h: number) =>
+      b64([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, ...u32(w), ...u32(h), 8, 6, 0, 0, 0])
+    const jpeg = (w: number, h: number) =>
+      b64([0xff, 0xd8, 0xff, 0xe0, 0, 16, ...Array(14).fill(0), 0xff, 0xc0, 0, 17, 8, h >> 8, h & 255, w >> 8, w & 255, 3, 0, 0, 0])
+    const gif = (w: number, h: number) => b64([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, w & 255, w >> 8, h & 255, h >> 8, 0, 0])
+    const image = (data: string): ChatBlock => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data } })
+
+    test('reads PNG, JPEG and GIF sizes', () => {
+      expect(imageSize(png(703, 42))).toEqual({ width: 703, height: 42 })
+      expect(imageSize(jpeg(1920, 1080))).toEqual({ width: 1920, height: 1080 })
+      expect(imageSize(gif(320, 200))).toEqual({ width: 320, height: 200 })
+      expect(imageSize(b64([1, 2, 3, 4, 5, 6]))).toBeUndefined()
+    })
+
+    test('a small screenshot costs width × height ÷ 750', () => {
+      expect(imageTokens(image(png(703, 42)))).toBe(40) // 703 × 42 ÷ 750 = 39.4
+    })
+
+    test('a large one is scaled down first, so it stays near 1,600', () => {
+      const tokens = imageTokens(image(png(3840, 2160)))
+      expect(tokens).toBeGreaterThan(1400)
+      expect(tokens).toBeLessThanOrEqual(1600)
+    })
+
+    test('an unreadable one counts as the estimate', () => {
+      expect(imageTokens(image('notbase64!'))).toBe(IMAGE_TOKENS_ESTIMATE)
+    })
+  })
+
+  test('the compaction summary is Claude\'s', () => {
+    const w = messageWeights([user(text(`${COMPACTION_SUMMARY_PREFIX} that ran out of context. ${x(400)}`))])
+    expect(w.claude).toBeGreaterThan(100)
+    expect(w.you + w.auto).toBe(0)
+  })
+
+  test('the parts add up to exactly the official total', () => {
+    for (const total of [1, 7, 999, 26_843, 150_001]) {
+      const weights = { you: 3.3, claude: 7.1, reads: 9.2, commands: 13.9, edits: 2.4, otherTools: 0.6, auto: 1.7 }
+      const parts = splitTokens(total, weights)
+      expect(Object.values(parts).reduce((n, v) => n + v, 0)).toBe(total)
+    }
+  })
+
+  test('shares follow the weights', () => {
+    const weights = { you: 1, claude: 1, reads: 1, commands: 1, edits: 0, otherTools: 0, auto: 0 }
+    expect(splitTokens(1000, weights)).toEqual({ you: 250, claude: 250, reads: 250, commands: 250, edits: 0, otherTools: 0, auto: 0 })
+  })
+
+  test('Messages is replaced in place by the parts, in a fixed order', () => {
+    const segments = splitMessages(
+      [seg('System tools', 6_800), seg('Messages', 10_000), seg('Free space', 100_000, 'free')],
+      [
+        user(text(x(400))),
+        assistant(text(x(400))),
+        assistant({ type: 'tool_use', id: 'w', name: 'Write', input: { content: x(400) } }),
+        assistant({ type: 'tool_use', id: 'r', name: 'Read', input: { file_path: x(400) } }),
+        user(text('<system-reminder>' + x(400) + '</system-reminder>')),
+      ],
+    )
+    expect(segments.map(s => s.name)).toEqual([
+      'System tools', 'Your messages', "Claude's replies", 'File reads', 'Edits', 'Auto context', 'Free space',
+    ])
+    expect(segments.slice(1, 6).reduce((n, s) => n + s.tokens, 0)).toBe(10_000)
+  })
+
+  test('nothing to weigh, or no Messages row: the breakdown stays as it is', () => {
+    const breakdown = [seg('Messages', 10_000), seg('Free space', 100_000, 'free')]
+    expect(splitMessages(breakdown, [])).toEqual(breakdown)
+    expect(splitMessages([seg('Free space', 1, 'free')], [user(text('hi'))])).toEqual([seg('Free space', 1, 'free')])
+  })
+
+  test('each part has its own colour from config', () => {
+    for (const name of Object.values(MESSAGE_PART_NAMES)) {
+      expect(colorOf(seg(name, 1))).toBe(CATEGORY_COLORS[name])
+    }
   })
 })

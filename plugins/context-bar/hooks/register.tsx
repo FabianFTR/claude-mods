@@ -1,14 +1,16 @@
 // Context bar: a band above the prompt with
-//   - the context window, category by category, and a legend under it;
+//   - the context window, category by category, and a legend under it, with
+//     the conversation split into your messages, Claude's replies, tools and
+//     auto context;
 //   - the session (5-hour) and weekly usage limits, one thin bar each.
 // /context-bar toggles the band; /context-bar context|session|weekly toggles
-// one part, as do the small buttons at the end of the legend.
+// one part, as do the small buttons in the bottom-right corner.
 // Colours, sizes and defaults are in ./config.ts.
 
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Limit, Show, Snapshot } from '../types'
+import type { Limit, Segment, Show, Snapshot } from '../types'
 import {
   APP_ZOOM,
   BAR_HEIGHT_PX,
@@ -23,6 +25,7 @@ import {
   PACE_MARKER,
   SHOW_PROJECTION_WHEN_RED,
   SHOW_TOGGLE_BUTTONS,
+  SPLIT_MESSAGES,
   TERMINAL_GLYPHS,
   TERMINAL_TOGGLE_DOTS,
   TOGGLE_COLUMN_WIDTH,
@@ -49,9 +52,11 @@ import {
   ordered,
   percent,
   projectedPercent,
+  splitMessages,
   usedTokens,
   zoomFromConfig,
 } from './layout'
+import type { ChatMessage } from './layout'
 
 const isOn = atom({ plugin: 'context-bar', key: 'isOn' } as const, true)
 const snapshot = atom({ plugin: 'context-bar', key: 'snapshot' } as const, null)
@@ -77,13 +82,21 @@ async function refresh($: any) {
 
   const breakdown = usage.context.breakdown
   if (!breakdown) return
+  const segments: Segment[] = breakdown.categories
+    .filter((c: any) => c.kind !== 'deferred' && c.tokens > 0)
+    .map((c: any) => ({ name: c.name, tokens: c.tokens, color: c.color, kind: c.kind }))
+
   const next: Snapshot = {
     window: breakdown.rawMaxTokens,
-    segments: breakdown.categories
-      .filter((c: any) => c.kind !== 'deferred' && c.tokens > 0)
-      .map((c: any) => ({ name: c.name, tokens: c.tokens, color: c.color, kind: c.kind })),
+    segments: SPLIT_MESSAGES ? splitMessages(segments, await readConversation($)) : segments,
   }
   await update($, snapshot, () => next)
+}
+
+/** The conversation in Messages API form; empty when it cannot be read. */
+async function readConversation($: any): Promise<ChatMessage[]> {
+  const messages = await $.session.messages({ as: 'api' }).catch(() => [])
+  return Array.isArray(messages) ? messages : []
 }
 
 /**

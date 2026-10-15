@@ -15,7 +15,16 @@ export const CATEGORY_COLORS: Record<string, string> = {
   'Custom agents': '#C084FC', // light purple: agents
   'Memory files': '#E879F9', // fuchsia: CLAUDE.md and memory
   Skills: '#F97316', // orange: skills
-  Messages: '#7C3AED', // deep violet: the conversation itself
+  Messages: '#7C3AED', // deep violet: the conversation, when not split
+  // Messages split by who wrote it (see Messages split below):
+  'Your messages': '#A78BFA', // light violet: what you typed and pasted
+  "Claude's replies": '#7C3AED', // deep violet: what Claude wrote
+  // Tool use, in the family of System tools (blues):
+  'File reads': '#BFDBFE', // palest blue: files read, and what came back
+  Commands: '#93C5FD', // light blue: shell commands and their output
+  Edits: '#1D4ED8', // deep blue: text written into files
+  'Other tools': '#7DD3FC', // sky blue: MCP, browser, web, agents, questions...
+  'Auto context': '#94A3B8', // grey-blue: reminders and plugin context added for you
 }
 
 // Any category not listed above (a new one in a future version).
@@ -26,6 +35,59 @@ export const FREE_COLOR = '#3F3F46'
 
 // The fine line framing the whole bar.
 export const OUTLINE_COLOR = '#52525B'
+
+// ── Messages split ──────────────────────────────────────────────────────────
+// /context counts the whole conversation as one `Messages` row. When on, the
+// bar splits it by reading the conversation and weighing each part; the parts
+// always add up to the official Messages figure. In bar order:
+export const SPLIT_MESSAGES = true
+export const MESSAGE_PART_NAMES = {
+  you: 'Your messages', // text you typed, images and files you pasted
+  claude: "Claude's replies", // Claude's text and thinking, and the compaction summary
+  reads: 'File reads', // READ_TOOLS and SHELL_READ_COMMANDS, with what they returned
+  commands: 'Commands', // COMMAND_TOOLS, with their output
+  edits: 'Edits', // EDIT_TOOLS: the text written
+  otherTools: 'Other tools', // every other tool, with its result
+  auto: 'Auto context', // reminders, plugin and hook context, command echoes
+} as const
+
+// Which tool goes to which part, by name. A tool's result goes with its call.
+export const READ_TOOLS = ['Read', 'Grep', 'Glob', 'LS', 'NotebookRead']
+export const COMMAND_TOOLS = ['Bash', 'PowerShell', 'Monitor', 'BashOutput', 'KillShell']
+export const EDIT_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']
+
+// A shell command whose first program is one of these only reads, so it counts
+// as File reads. Leading `cd dir &&` and `VAR=value` are skipped. `sed` counts
+// only with -n (sed -i writes).
+export const SHELL_READ_COMMANDS = [
+  'cat', 'head', 'tail', 'less', 'more', 'sed -n', 'grep', 'egrep', 'rg',
+  'ls', 'find', 'tree', 'wc', 'stat', 'file',
+  'Get-Content', 'gc', 'Select-String', 'Get-ChildItem', 'gci', 'dir', 'type',
+]
+
+// An image counts by its size (width × height ÷ 750, as the API bills it). A
+// pasted document, or an image whose size cannot be read, counts as this many
+// tokens instead (a typical full screenshot).
+export const IMAGE_TOKENS_ESTIMATE = 1500
+
+// Text in your messages that you did not type: blocks starting with any of
+// these count as Auto context. <system-reminder> sections inside your own
+// text are taken out and counted there too.
+export const AUTO_CONTEXT_PREFIXES = [
+  '<system-reminder>',
+  '<local-command-',
+  '<command-name>',
+  '<command-message>',
+  '[Image: source:',
+  'Base directory for this skill',
+  'Caveat:',
+  '[Usage limit',
+  '[Earlier usage-limit',
+]
+
+// The summary that replaces the conversation after compaction starts like
+// this; it counts as Claude's replies.
+export const COMPACTION_SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
 
 // ── Bar ─────────────────────────────────────────────────────────────────────
 // A category below this share of the window shows in the legend only.

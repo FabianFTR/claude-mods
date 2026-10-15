@@ -3,22 +3,30 @@
 
 import type { Limit, Segment } from '../types'
 import {
+  AUTO_CONTEXT_PREFIXES,
   CATEGORY_COLORS,
+  COMMAND_TOOLS,
+  COMPACTION_SUMMARY_PREFIX,
   DIVISION_COLOR,
   EARLY_DANGER_AT,
   EARLY_WARN_AT,
+  EDIT_TOOLS,
   FALLBACK_COLOR,
   FREE_COLOR,
   HATCH_BASE_OPACITY,
   HATCH_SPACING,
   HATCH_STRIPE,
+  IMAGE_TOKENS_ESTIMATE,
   LIMIT_COLORS,
+  MESSAGE_PART_NAMES,
   MIN_VISIBLE_SHARE,
   OUTLINE_COLOR,
   PACE_COLOR,
   PROJECTION_DANGER_AT,
   PROJECTION_MIN_ELAPSED,
   PROJECTION_WARN_AT,
+  READ_TOOLS,
+  SHELL_READ_COMMANDS,
   USED_DANGER_AT,
 } from './config'
 
@@ -255,4 +263,255 @@ export function zoomFromConfig(text: string | undefined): number {
   } catch {
     return 1
   }
+}
+
+// ── Messages split ──────────────────────────────────────────────────────────
+
+/** One content block of a conversation message, as the session hands it over. */
+export type ChatBlock = { type: string; [field: string]: unknown }
+/** One conversation message in Messages API form. */
+export type ChatMessage = { role: 'user' | 'assistant'; content: readonly ChatBlock[] }
+
+export type MessagePart = keyof typeof MESSAGE_PART_NAMES
+export type MessageWeights = Record<MessagePart, number>
+
+const PARTS = Object.keys(MESSAGE_PART_NAMES) as MessagePart[]
+const noWeights = (): MessageWeights =>
+  Object.fromEntries(PARTS.map(p => [p, 0])) as MessageWeights
+
+// Rough tokens in a text: about four characters each. Only the proportions
+// between parts matter, since the official total is what gets split.
+const textWeight = (text: string) => text.length / 4
+
+const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/** The first `count` bytes of base64 data, decoded; enough to read an image header. */
+function headBytes(base64: string, count: number): number[] {
+  const bytes: number[] = []
+  let bits = 0
+  let buffer = 0
+  for (const ch of base64) {
+    const value = BASE64.indexOf(ch)
+    if (value < 0) continue
+    buffer = ((buffer << 6) | value) & 0xffffff
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      bytes.push((buffer >> bits) & 0xff)
+      if (bytes.length >= count) break
+    }
+  }
+  return bytes
+}
+
+/** Width and height from a PNG, GIF, WebP or JPEG header; undefined otherwise. */
+export function imageSize(base64: string): { width: number; height: number } | undefined {
+  const b = headBytes(base64.slice(0, 96_000), 72_000)
+  const at = (i: number) => b[i] ?? 0
+  const u16be = (i: number) => (at(i) << 8) | at(i + 1)
+  const u16le = (i: number) => at(i) | (at(i + 1) << 8)
+  const u32be = (i: number) => at(i) * 2 ** 24 + (at(i + 1) << 16) + (at(i + 2) << 8) + at(i + 3)
+
+  if (at(0) === 0x89 && at(1) === 0x50) return { width: u32be(16), height: u32be(20) } // PNG
+  if (at(0) === 0x47 && at(1) === 0x49) return { width: u16le(6), height: u16le(8) } // GIF
+  if (at(8) === 0x57 && at(9) === 0x45 && at(12) === 0x56 && at(15) === 0x58) {
+    // WebP (VP8X): 24-bit sizes, stored minus one
+    const u24le = (i: number) => at(i) | (at(i + 1) << 8) | (at(i + 2) << 16)
+    return { width: 1 + u24le(24), height: 1 + u24le(27) }
+  }
+  if (at(0) === 0xff && at(1) === 0xd8) {
+    // JPEG: walk the markers to the frame header (SOF0–SOF15, not DHT/JPG/DAC)
+    let i = 2
+    while (i + 9 < b.length) {
+      if (at(i) !== 0xff) return undefined
+      const marker = at(i + 1)
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: u16be(i + 7), height: u16be(i + 5) }
+      }
+      i += 2 + u16be(i + 2)
+    }
+  }
+  return undefined
+}
+
+/**
+ * Tokens an image costs: width × height ÷ 750, after the API scales it down to
+ * at most 1568 pixels on its long side and about 1.15 megapixels in all;
+ * IMAGE_TOKENS_ESTIMATE when the size is unknown.
+ */
+export function imageTokens(block: ChatBlock): number {
+  const source = block.source as { type?: string; data?: unknown } | undefined
+  const size = source?.type === 'base64' && typeof source.data === 'string' ? imageSize(source.data) : undefined
+  if (!size || size.width <= 0 || size.height <= 0) return IMAGE_TOKENS_ESTIMATE
+  const scale = Math.min(1, 1568 / Math.max(size.width, size.height), Math.sqrt(1_150_000 / (size.width * size.height)))
+  return Math.ceil((size.width * scale * size.height * scale) / 750)
+}
+
+/** The weight of whatever a block holds: text, a JSON input, nested blocks, media. */
+function blockWeight(block: ChatBlock): number {
+  switch (block.type) {
+    case 'text':
+      return textWeight(String(block.text ?? ''))
+    case 'thinking':
+      return textWeight(String(block.thinking ?? ''))
+    case 'image':
+      return imageTokens(block)
+    case 'document':
+      return IMAGE_TOKENS_ESTIMATE
+    case 'tool_use':
+    case 'server_tool_use':
+      return textWeight(JSON.stringify(block.input ?? {}))
+    case 'tool_result':
+    case 'web_search_tool_result':
+    case 'web_fetch_tool_result': {
+      const content = block.content
+      if (typeof content === 'string') return textWeight(content)
+      if (Array.isArray(content)) return content.reduce((n, b) => n + blockWeight(b as ChatBlock), 0)
+      return 0
+    }
+    default:
+      return textWeight(JSON.stringify(block))
+  }
+}
+
+/** Adds the weight of one block of a user message to the part it belongs to. */
+function weighUserText(text: string, weights: MessageWeights) {
+  const trimmed = text.trimStart()
+  if (trimmed.startsWith(COMPACTION_SUMMARY_PREFIX)) {
+    weights.claude += textWeight(text)
+    return
+  }
+  if (AUTO_CONTEXT_PREFIXES.some(prefix => trimmed.startsWith(prefix))) {
+    weights.auto += textWeight(text)
+    return
+  }
+  // Your own text, with any reminders the engine appended taken out.
+  const reminders = text.match(SYSTEM_REMINDER) ?? []
+  const auto = reminders.reduce((n, r) => n + r.length, 0)
+  weights.auto += auto / 4
+  weights.you += (text.length - auto) / 4
+}
+
+const ASSIGNMENT = /^\$?[A-Za-z_][A-Za-z0-9_:]*=/
+
+/** Whether a command sends output into a file (`> f`, `>> f`), so writes. */
+function writesFile(command: string): boolean {
+  const words = command.split(/\s+/)
+  return words.some((word, i) => {
+    const redirect = /^\d?>>?(.*)$/.exec(word)
+    if (!redirect) return false
+    const target = redirect[1] || words[i + 1] || ''
+    return !/^(&\d|\/dev\/null|\$null|nul)$/i.test(target)
+  })
+}
+
+/**
+ * Whether a shell command only reads: its first program, past any leading
+ * `cd dir`, `VAR=value` or `$Var = value` steps, is one of SHELL_READ_COMMANDS,
+ * and nothing is written to a file with `>` or `>>`.
+ */
+export function isShellRead(command: string): boolean {
+  const steps = command.trim().split(/\s*(?:&&|;|\n)\s*/)
+  const first =
+    steps
+      .map(step => step.replace(/^(\$?[A-Za-z_][A-Za-z0-9_:]*)\s+=\s+/, '$1='))
+      .find(step => {
+        if (/^(cd|pushd|Set-Location)\b/i.test(step)) return false
+        // A step of nothing but assignments sets up; the work comes after it.
+        return !step.split(/\s+/).every(word => ASSIGNMENT.test(word))
+      }) ?? ''
+  const words = first.split(/\s+/).filter(word => !ASSIGNMENT.test(word))
+  const program = words[0] ?? ''
+  if (writesFile(command)) return false
+  return SHELL_READ_COMMANDS.some(entry => {
+    const [name, ...flags] = entry.split(' ')
+    if (program.toLowerCase() !== name!.toLowerCase()) return false
+    return flags.every(flag => words.slice(1).includes(flag))
+  })
+}
+
+/** The part a tool call, and so its result, belongs to. */
+export function toolPart(name: string, input: unknown): MessagePart {
+  if (READ_TOOLS.includes(name)) return 'reads'
+  if (EDIT_TOOLS.includes(name)) return 'edits'
+  if (COMMAND_TOOLS.includes(name)) {
+    const command = (input as { command?: unknown } | undefined)?.command
+    return typeof command === 'string' && isShellRead(command) ? 'reads' : 'commands'
+  }
+  return 'otherTools'
+}
+
+/**
+ * How much of the conversation each part holds, in rough tokens: what you
+ * wrote, what Claude wrote, each kind of tool use, and context added for you.
+ */
+export function messageWeights(messages: readonly ChatMessage[]): MessageWeights {
+  // Each call's part, by its id, so its result can follow it.
+  const callParts = new Map<unknown, MessagePart>()
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'tool_use' || block.type === 'server_tool_use') {
+        callParts.set(block.id, toolPart(String(block.name ?? ''), block.input))
+      }
+    }
+  }
+
+  const weights = noWeights()
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'tool_use' || block.type === 'server_tool_use') {
+        weights[callParts.get(block.id)!] += blockWeight(block)
+      } else if (block.type === 'tool_result' || block.type.endsWith('_tool_result')) {
+        weights[callParts.get(block.tool_use_id) ?? 'otherTools'] += blockWeight(block)
+      } else if (message.role === 'assistant') {
+        weights.claude += blockWeight(block)
+      } else if (block.type === 'text') {
+        weighUserText(String(block.text ?? ''), weights)
+      } else {
+        weights.you += blockWeight(block)
+      }
+    }
+  }
+  return weights
+}
+
+/**
+ * \`total\` tokens shared out in proportion to \`weights\`, in whole tokens that
+ * add up to exactly \`total\` (largest remainders get the leftovers).
+ */
+export function splitTokens(total: number, weights: MessageWeights): MessageWeights {
+  const parts = Object.keys(weights) as MessagePart[]
+  const sum = parts.reduce((n, p) => n + weights[p], 0)
+  const out = noWeights()
+  if (sum <= 0 || total <= 0) return out
+
+  const exact = parts.map(p => ({ p, value: (weights[p] / sum) * total }))
+  let given = 0
+  for (const { p, value } of exact) {
+    out[p] = Math.floor(value)
+    given += out[p]
+  }
+  const byRemainder = [...exact].sort((a, b) => (b.value % 1) - (a.value % 1))
+  for (let i = 0; i < total - given; i++) out[byRemainder[i % byRemainder.length]!.p] += 1
+  return out
+}
+
+/**
+ * The breakdown with its \`Messages\` row replaced by the four parts, in its
+ * place; unchanged when there is no Messages row or nothing to weigh.
+ */
+export function splitMessages(segments: readonly Segment[], messages: readonly ChatMessage[]): Segment[] {
+  const index = segments.findIndex(s => s.name === 'Messages')
+  if (index < 0) return [...segments]
+  const row = segments[index]!
+  const weights = messageWeights(messages)
+  const tokens = splitTokens(row.tokens, weights)
+  if (PARTS.every(p => tokens[p] === 0)) return [...segments]
+
+  const parts = PARTS
+    .filter(p => tokens[p] > 0)
+    .map(p => ({ name: MESSAGE_PART_NAMES[p], tokens: tokens[p], color: row.color, kind: row.kind }))
+  return [...segments.slice(0, index), ...parts, ...segments.slice(index + 1)]
 }
